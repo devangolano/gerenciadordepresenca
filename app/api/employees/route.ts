@@ -1,36 +1,55 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, Employee } from "@/lib/db";
+import { supabase } from "@/lib/supabase";
+import { Employee } from "@/lib/db";
 
 export async function GET() {
   try {
-    const db = getDb();
-    const employees = db
-      .prepare(`
-        SELECT * FROM employees 
-        WHERE is_active = 1 
-        ORDER BY name ASC
-      `)
-      .all() as Employee[];
+    const { data: employees, error } = await supabase
+      .from("employees")
+      .select("*")
+      .eq("is_active", 1)
+      .order("name", { ascending: true });
 
-    // For each employee, get today's punches
-    const enriched = employees.map((emp) => {
-      const todayPunches = db
-        .prepare(`
-          SELECT * FROM attendance_records 
-          WHERE employee_id = ? AND date(timestamp) = date('now', 'localtime')
-          ORDER BY timestamp ASC
-        `)
-        .all(emp.id);
+    if (error) {
+      // If table does not exist yet
+      if (error.code === "PGRST205") {
+        return NextResponse.json({
+          success: true,
+          employees: [],
+          needsTableSetup: true,
+          message: "Tabelas ainda não criadas no Supabase. Execute o script supabase_schema.sql no SQL Editor do Supabase.",
+        });
+      }
+      throw error;
+    }
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // Fetch today's punches for all employees
+    const { data: todayPunches } = await supabase
+      .from("attendance_records")
+      .select("*")
+      .gte("timestamp", startOfDay.toISOString())
+      .lte("timestamp", endOfDay.toISOString())
+      .order("timestamp", { ascending: true });
+
+    const enriched = (employees || []).map((emp: Employee) => {
+      const empTodayPunches = (todayPunches || []).filter(
+        (p: any) => p.employee_id === emp.id
+      );
 
       let currentStatus: "present" | "absent" | "day_off" = "absent";
-      if (todayPunches.length > 0) {
-        const lastPunch = todayPunches[todayPunches.length - 1] as any;
+      if (empTodayPunches.length > 0) {
+        const lastPunch = empTodayPunches[empTodayPunches.length - 1];
         currentStatus = lastPunch.type === "entry" ? "present" : "absent";
       }
 
       return {
         ...emp,
-        today_punches: todayPunches,
+        today_punches: empTodayPunches,
         current_status: currentStatus,
       };
     });
@@ -76,27 +95,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const db = getDb();
-    const insertStmt = db.prepare(`
-      INSERT INTO employees (
-        name, document, email, phone, department, position, pin,
-        photo_url, face_descriptor, fingerprint_id,
-        work_schedule_type, work_days, weekly_day_off,
-        start_time, end_time, break_start, break_end, tolerance_minutes
-      ) VALUES (
-        @name, @document, @email, @phone, @department, @position, @pin,
-        @photo_url, @face_descriptor, @fingerprint_id,
-        @work_schedule_type, @work_days, @weekly_day_off,
-        @start_time, @end_time, @break_start, @break_end, @tolerance_minutes
-      )
-    `);
-
-    const result = insertStmt.run({
+    const newEmployee = {
       name: name.trim(),
       document: document || null,
       email: email || null,
       phone: phone || null,
-      department: department || "Geral",
+      department: department || "Operações",
       position: position || "Colaborador",
       pin: pin || "1234",
       photo_url: photo_url || null,
@@ -110,11 +114,27 @@ export async function POST(req: NextRequest) {
       break_start: break_start || "12:00",
       break_end: break_end || "13:00",
       tolerance_minutes: Number(tolerance_minutes) || 15,
-    });
+      is_active: 1,
+    };
 
-    const created = db
-      .prepare("SELECT * FROM employees WHERE id = ?")
-      .get(result.lastInsertRowid);
+    const { data: created, error } = await supabase
+      .from("employees")
+      .insert(newEmployee)
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === "PGRST205") {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Tabelas ainda não existem no Supabase. Por favor, execute o script 'supabase_schema.sql' no SQL Editor do seu projeto Supabase.",
+          },
+          { status: 400 }
+        );
+      }
+      throw error;
+    }
 
     return NextResponse.json({ success: true, employee: created });
   } catch (error: any) {

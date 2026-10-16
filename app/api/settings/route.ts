@@ -1,12 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 
 export async function GET() {
   try {
-    const db = getDb();
-    const rows = db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
-    const settings: Record<string, string> = {};
-    rows.forEach((r) => {
+    const { data: rows, error } = await supabase.from("settings").select("*");
+
+    if (error) {
+      if (error.code === "PGRST205") {
+        return NextResponse.json({
+          success: true,
+          settings: {
+            terminal_pin: "1234",
+            company_name: "Gestão de Presença & Biometria",
+            tolerance_default: "15",
+          },
+        });
+      }
+      throw error;
+    }
+
+    const settings: Record<string, string> = {
+      terminal_pin: "1234",
+      company_name: "Gestão de Presença & Biometria",
+      tolerance_default: "15",
+    };
+
+    (rows || []).forEach((r: any) => {
       settings[r.key] = r.value;
     });
 
@@ -19,19 +38,19 @@ export async function GET() {
 export async function PUT(req: NextRequest) {
   try {
     const body = await req.json();
-    const db = getDb();
-
-    const updateStmt = db.prepare(`
-      INSERT INTO settings (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `);
-
     const keys = Object.keys(body);
+
     for (const key of keys) {
-      updateStmt.run(key, String(body[key]));
+      await supabase.from("settings").upsert(
+        {
+          key,
+          value: String(body[key]),
+        },
+        { onConflict: "key" }
+      );
     }
 
-    return NextResponse.json({ success: true, message: "Configurações salvas com sucesso!" });
+    return NextResponse.json({ success: true, message: "Configurações salvas com sucesso no Supabase!" });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }

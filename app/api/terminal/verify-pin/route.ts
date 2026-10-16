@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 
 export async function POST(req: NextRequest) {
   try {
@@ -8,18 +8,36 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, message: "Senha não fornecida." }, { status: 400 });
     }
 
-    const db = getDb();
-    const setting = db
-      .prepare("SELECT value FROM settings WHERE key = 'terminal_pin'")
-      .get() as { value: string } | undefined;
+    let actualPin = "1234";
+    let companyName = "Gestão de Presença & Biometria";
 
-    const actualPin = setting?.value || "1234";
+    try {
+      const { data: pinRow } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", "terminal_pin")
+        .single();
+
+      if (pinRow?.value) {
+        actualPin = pinRow.value;
+      }
+
+      const { data: compRow } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", "company_name")
+        .single();
+
+      if (compRow?.value) {
+        companyName = compRow.value;
+      }
+    } catch {}
 
     if (pin.trim() === actualPin.trim()) {
       return NextResponse.json({
         success: true,
         message: "Acesso autorizado ao terminal.",
-        companyName: (db.prepare("SELECT value FROM settings WHERE key = 'company_name'").get() as any)?.value || "Gestão de Presença",
+        companyName,
       });
     }
 

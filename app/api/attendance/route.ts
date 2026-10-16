@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 import { registerAttendancePunch } from "@/lib/attendance";
 
 export async function GET(req: NextRequest) {
@@ -9,36 +9,40 @@ export async function GET(req: NextRequest) {
     const employeeId = searchParams.get("employeeId");
     const limit = Number(searchParams.get("limit")) || 100;
 
-    const db = getDb();
-
-    let query = `
-      SELECT 
-        a.*,
-        e.name as employee_name,
-        e.department as employee_department,
-        e.photo_url as employee_photo
-      FROM attendance_records a
-      JOIN employees e ON a.employee_id = e.id
-      WHERE 1=1
-    `;
-    const params: any[] = [];
+    let query = supabase
+      .from("attendance_records")
+      .select("*, employees(name, department, photo_url)")
+      .order("timestamp", { ascending: false })
+      .limit(limit);
 
     if (date) {
-      query += " AND date(a.timestamp) = date(?)";
-      params.push(date);
+      const startOfDay = `${date}T00:00:00.000Z`;
+      const endOfDay = `${date}T23:59:59.999Z`;
+      query = query.gte("timestamp", startOfDay).lte("timestamp", endOfDay);
     }
 
     if (employeeId) {
-      query += " AND a.employee_id = ?";
-      params.push(Number(employeeId));
+      query = query.eq("employee_id", Number(employeeId));
     }
 
-    query += " ORDER BY a.timestamp DESC LIMIT ?";
-    params.push(limit);
+    const { data: records, error } = await query;
 
-    const records = db.prepare(query).all(...params);
+    if (error) {
+      if (error.code === "PGRST205") {
+        return NextResponse.json({ success: true, records: [] });
+      }
+      throw error;
+    }
 
-    return NextResponse.json({ success: true, records });
+    // Flatten employee details for UI compatibility
+    const flattened = (records || []).map((r: any) => ({
+      ...r,
+      employee_name: r.employees?.name || "Colaborador",
+      employee_department: r.employees?.department || "Geral",
+      employee_photo: r.employees?.photo_url || null,
+    }));
+
+    return NextResponse.json({ success: true, records: flattened });
   } catch (error: any) {
     console.error("Error fetching attendance:", error);
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -59,14 +63,16 @@ export async function POST(req: NextRequest) {
       confirmedExit,
     } = body;
 
-    const db = getDb();
     let targetEmployeeId = employeeId;
 
     // If no employeeId but PIN was sent
     if (!targetEmployeeId && pin) {
-      const match = db
-        .prepare("SELECT id FROM employees WHERE pin = ? AND is_active = 1")
-        .get(pin.trim()) as { id: number } | undefined;
+      const { data: match } = await supabase
+        .from("employees")
+        .select("id")
+        .eq("pin", pin.trim())
+        .eq("is_active", 1)
+        .single();
 
       if (!match) {
         return NextResponse.json(
@@ -79,9 +85,12 @@ export async function POST(req: NextRequest) {
 
     // If no employeeId but fingerprintId was sent
     if (!targetEmployeeId && fingerprintId) {
-      const match = db
-        .prepare("SELECT id FROM employees WHERE fingerprint_id = ? AND is_active = 1")
-        .get(fingerprintId) as { id: number } | undefined;
+      const { data: match } = await supabase
+        .from("employees")
+        .select("id")
+        .eq("fingerprint_id", fingerprintId)
+        .eq("is_active", 1)
+        .single();
 
       if (!match) {
         return NextResponse.json(
@@ -99,7 +108,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = registerAttendancePunch({
+    const result = await registerAttendancePunch({
       employeeId: Number(targetEmployeeId),
       verificationMethod: verificationMethod as "face" | "fingerprint" | "pin",
       type: type || undefined,

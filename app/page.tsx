@@ -106,7 +106,7 @@ export default function DashboardPage() {
         <div className="space-y-1">
           <div className="flex items-center gap-2 font-mono text-xs uppercase tracking-widest text-zinc-400">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>ESTAÇÃO BIOMÉTRICA DE CONTROLE • SQLITE</span>
+            <span>ESTAÇÃO BIOMÉTRICA DE CONTROLE • SUPABASE CLOUD</span>
           </div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
             Painel de Presença & Ponto Eletrônico

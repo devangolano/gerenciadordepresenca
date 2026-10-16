@@ -1,4 +1,5 @@
-import { getDb, Employee, AttendanceRecord } from "./db";
+import { supabase } from "./supabase";
+import { Employee, AttendanceRecord } from "./db";
 
 export interface AttendanceResult {
   success: boolean;
@@ -19,37 +20,44 @@ export interface AttendanceResult {
   code?: string;
 }
 
-export function registerAttendancePunch(params: {
+export async function registerAttendancePunch(params: {
   employeeId: number;
   verificationMethod: "face" | "fingerprint" | "pin";
   type?: "entry" | "exit";
   photoSnapshot?: string;
   notes?: string;
   confirmedExit?: boolean;
-}): AttendanceResult {
-  const db = getDb();
+}): Promise<AttendanceResult> {
+  // 1. Fetch employee
+  const { data: employee, error: empErr } = await supabase
+    .from("employees")
+    .select("*")
+    .eq("id", params.employeeId)
+    .eq("is_active", 1)
+    .single();
 
-  // Find employee
-  const employee = db
-    .prepare("SELECT * FROM employees WHERE id = ? AND is_active = 1")
-    .get(params.employeeId) as Employee | undefined;
-
-  if (!employee) {
+  if (empErr || !employee) {
     return { success: false, message: "Funcionário não encontrado ou inativo." };
   }
 
   const now = new Date();
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date();
+  endOfDay.setHours(23, 59, 59, 999);
 
-  // Query ALL punches for this employee today
-  const todayPunches = db
-    .prepare(
-      `SELECT * FROM attendance_records 
-       WHERE employee_id = ? AND date(timestamp) = date('now', 'localtime')
-       ORDER BY timestamp ASC`
-    )
-    .all(employee.id) as AttendanceRecord[];
+  // 2. Query today's punches
+  const { data: todayRecords } = await supabase
+    .from("attendance_records")
+    .select("*")
+    .eq("employee_id", employee.id)
+    .gte("timestamp", startOfDay.toISOString())
+    .lte("timestamp", endOfDay.toISOString())
+    .order("timestamp", { ascending: true });
 
-  // RULE: Maximum 2 punches per day (1 Entry, 1 Exit)
+  const todayPunches = (todayRecords || []) as AttendanceRecord[];
+
+  // RULE 1: Daily limit (maximum 2 punches per day)
   if (todayPunches.length >= 2) {
     return {
       success: false,
@@ -65,42 +73,36 @@ export function registerAttendancePunch(params: {
     };
   }
 
-  // RULE: If employee already has 1 punch today, the 2nd punch MUST be Exit (Saída)
-  // and MUST ask for confirmation if not explicitly confirmed yet!
-  if (todayPunches.length === 1) {
-    if (!params.confirmedExit) {
-      const firstPunch = todayPunches[0];
-      const firstTime = new Date(firstPunch.timestamp).toLocaleTimeString("pt-BR", {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
+  // RULE 2: If 1 punch exists, 2nd punch requires exit confirmation
+  if (todayPunches.length === 1 && !params.confirmedExit) {
+    const firstPunch = todayPunches[0];
+    const firstTime = new Date(firstPunch.timestamp).toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
 
-      return {
-        success: false,
-        requiresExitConfirmation: true,
-        firstPunchTime: firstTime,
-        message: `Segunda batida do dia. Confirmar encerramento do expediente e saída de ${employee.name}?`,
-        employee: {
-          id: employee.id,
-          name: employee.name,
-          department: employee.department,
-          position: employee.position,
-          photo_url: employee.photo_url,
-        },
-      };
-    }
+    return {
+      success: false,
+      requiresExitConfirmation: true,
+      firstPunchTime: firstTime,
+      message: `Segunda batida do dia. Confirmar encerramento do expediente e saída de ${employee.name}?`,
+      employee: {
+        id: employee.id,
+        name: employee.name,
+        department: employee.department,
+        position: employee.position,
+        photo_url: employee.photo_url,
+      },
+    };
   }
 
-  // Determine punch type:
-  // - 0 punches today -> Entry (Entrada)
-  // - 1 punch today -> Exit (Saída)
+  // Determine punch type: 1st is entry, 2nd is exit
   const punchType: "entry" | "exit" = todayPunches.length === 0 ? "entry" : "exit";
 
-  // Anti-double-punch check within 20 seconds
+  // Anti-double-punch check within 20s
   if (todayPunches.length > 0) {
     const lastPunch = todayPunches[todayPunches.length - 1];
-    const lastPunchTime = new Date(lastPunch.timestamp).getTime();
-    const diffSeconds = (now.getTime() - lastPunchTime) / 1000;
+    const diffSeconds = (now.getTime() - new Date(lastPunch.timestamp).getTime()) / 1000;
     if (diffSeconds < 20) {
       return {
         success: true,
@@ -120,7 +122,7 @@ export function registerAttendancePunch(params: {
   }
 
   // Calculate day of week and work schedule
-  const dayOfWeek = now.getDay(); // 0 is Sunday, 1 is Monday ... 6 is Saturday
+  const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon...
   let workDays: number[] = [1, 2, 3, 4, 5];
   try {
     if (employee.work_days) {
@@ -131,8 +133,6 @@ export function registerAttendancePunch(params: {
   }
 
   const isWorkDay = workDays.includes(dayOfWeek);
-
-  // Time calculations
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
   let status: "on_time" | "late" | "early_exit" | "day_off_work" | "overtime" = "on_time";
@@ -143,7 +143,6 @@ export function registerAttendancePunch(params: {
     status = "day_off_work";
     statusMessage = "Registro em dia de folga previsto.";
   } else if (punchType === "entry") {
-    // Check start time and tolerance
     const [startH, startM] = (employee.start_time || "08:00").split(":").map(Number);
     const scheduledStartMinutes = startH * 60 + startM;
     const tolerance = Number(employee.tolerance_minutes) || 15;
@@ -158,7 +157,6 @@ export function registerAttendancePunch(params: {
       statusMessage = `Entrada registrada no horário com sucesso!`;
     }
   } else {
-    // Exit punch
     const [endH, endM] = (employee.end_time || "17:00").split(":").map(Number);
     const scheduledEndMinutes = endH * 60 + endM;
     const tolerance = Number(employee.tolerance_minutes) || 15;
@@ -176,33 +174,34 @@ export function registerAttendancePunch(params: {
     }
   }
 
-  // Insert into database
-  const insertStmt = db.prepare(`
-    INSERT INTO attendance_records (
-      employee_id, timestamp, type, verification_method, status, delay_minutes, photo_snapshot, notes
-    ) VALUES (
-      @employee_id, datetime('now', 'localtime'), @type, @verification_method, @status, @delay_minutes, @photo_snapshot, @notes
-    )
-  `);
+  // Insert into Supabase
+  const { data: savedRecord, error: insertErr } = await supabase
+    .from("attendance_records")
+    .insert({
+      employee_id: employee.id,
+      timestamp: now.toISOString(),
+      type: punchType,
+      verification_method: params.verificationMethod,
+      status: status,
+      delay_minutes: delayMinutes,
+      photo_snapshot: params.photoSnapshot || null,
+      notes: params.notes || null,
+    })
+    .select()
+    .single();
 
-  const info = insertStmt.run({
-    employee_id: employee.id,
-    type: punchType,
-    verification_method: params.verificationMethod,
-    status: status,
-    delay_minutes: delayMinutes,
-    photo_snapshot: params.photoSnapshot || null,
-    notes: params.notes || null,
-  });
-
-  const savedRecord = db
-    .prepare("SELECT * FROM attendance_records WHERE id = ?")
-    .get(info.lastInsertRowid) as AttendanceRecord;
+  if (insertErr) {
+    console.error("Supabase insert error:", insertErr);
+    return {
+      success: false,
+      message: "Erro ao gravar ponto no banco: " + insertErr.message,
+    };
+  }
 
   return {
     success: true,
     message: statusMessage,
-    record: savedRecord,
+    record: savedRecord as AttendanceRecord,
     employee: {
       id: employee.id,
       name: employee.name,

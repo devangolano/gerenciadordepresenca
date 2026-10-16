@@ -1,28 +1,62 @@
 import { NextResponse } from "next/server";
-import { getDb, Employee } from "@/lib/db";
+import { supabase } from "@/lib/supabase";
+import { Employee } from "@/lib/db";
 
 export async function GET() {
   try {
-    const db = getDb();
+    // 1. Fetch active employees
+    const { data: employeesData, error: empErr } = await supabase
+      .from("employees")
+      .select("*")
+      .eq("is_active", 1);
 
-    // Total active employees
-    const totalEmployeesRow = db
-      .prepare("SELECT COUNT(*) as count FROM employees WHERE is_active = 1")
-      .get() as { count: number };
-    const totalEmployees = totalEmployeesRow.count;
+    if (empErr && empErr.code === "PGRST205") {
+      // Tables not yet created in Supabase
+      return NextResponse.json({
+        success: true,
+        stats: {
+          totalEmployees: 0,
+          presentToday: 0,
+          lateToday: 0,
+          absentToday: 0,
+          dayOffToday: 0,
+          attendanceRate: 0,
+        },
+        recentPunches: [],
+        terminalPin: "1234",
+        needsTableSetup: true,
+      });
+    }
 
-    // All active employees
-    const employees = db
-      .prepare("SELECT * FROM employees WHERE is_active = 1")
-      .all() as Employee[];
+    const employees = (employeesData || []) as Employee[];
+    const totalEmployees = employees.length;
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // 2. Fetch today's attendance records
+    const { data: todayRecords } = await supabase
+      .from("attendance_records")
+      .select("*, employees(name, department, position, photo_url)")
+      .gte("timestamp", startOfDay.toISOString())
+      .lte("timestamp", endOfDay.toISOString())
+      .order("timestamp", { ascending: false });
+
+    const recentPunches = (todayRecords || []).slice(0, 10).map((r: any) => ({
+      ...r,
+      employee_name: r.employees?.name || "Colaborador",
+      employee_department: r.employees?.department || "Geral",
+      employee_position: r.employees?.position || "Colaborador",
+      employee_photo: r.employees?.photo_url || null,
+    }));
 
     const todayDayOfWeek = new Date().getDay();
-
     let presentTodayCount = 0;
     let lateTodayCount = 0;
     let dayOffCount = 0;
 
-    // Check each employee status today
     employees.forEach((emp) => {
       let workDays = [1, 2, 3, 4, 5];
       try {
@@ -33,21 +67,18 @@ export async function GET() {
         dayOffCount++;
       }
 
-      const todayPunches = db
-        .prepare(`
-          SELECT * FROM attendance_records 
-          WHERE employee_id = ? AND date(timestamp) = date('now', 'localtime')
-          ORDER BY timestamp ASC
-        `)
-        .all(emp.id) as any[];
+      const empPunchesToday = (todayRecords || []).filter(
+        (p: any) => p.employee_id === emp.id
+      );
 
-      if (todayPunches.length > 0) {
-        const lastPunch = todayPunches[todayPunches.length - 1];
+      if (empPunchesToday.length > 0) {
+        // Last punch is first in descending order
+        const lastPunch = empPunchesToday[0];
         if (lastPunch.type === "entry") {
           presentTodayCount++;
         }
-        const hadLateEntry = todayPunches.some((p) => p.status === "late");
-        if (hadLateEntry) {
+        const hadLate = empPunchesToday.some((p: any) => p.status === "late");
+        if (hadLate) {
           lateTodayCount++;
         }
       }
@@ -55,25 +86,16 @@ export async function GET() {
 
     const absentTodayCount = Math.max(0, totalEmployees - presentTodayCount - dayOffCount);
 
-    // Recent 10 punches
-    const recentPunches = db
-      .prepare(`
-        SELECT 
-          a.*,
-          e.name as employee_name,
-          e.department as employee_department,
-          e.position as employee_position,
-          e.photo_url as employee_photo
-        FROM attendance_records a
-        JOIN employees e ON a.employee_id = e.id
-        WHERE date(a.timestamp) = date('now', 'localtime')
-        ORDER BY a.timestamp DESC
-        LIMIT 10
-      `)
-      .all();
-
-    // Terminal PIN check status
-    const terminalPin = (db.prepare("SELECT value FROM settings WHERE key = 'terminal_pin'").get() as any)?.value || "1234";
+    // Terminal PIN
+    let terminalPin = "1234";
+    try {
+      const { data: pinRow } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", "terminal_pin")
+        .single();
+      if (pinRow?.value) terminalPin = pinRow.value;
+    } catch {}
 
     return NextResponse.json({
       success: true,

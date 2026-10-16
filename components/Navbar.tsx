@@ -32,8 +32,8 @@ export default function Navbar() {
                 <span className="font-mono text-sm tracking-tight font-bold text-white">
                   PONTO.BIO
                 </span>
-                <span className="hidden sm:inline-block font-mono text-[9px] uppercase px-1.5 py-0.5 rounded bg-[#181a22] text-zinc-400 border border-[#272935]">
-                  SQLite
+                <span className="hidden sm:inline-block font-mono text-[9px] uppercase px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-800">
+                  Supabase
                 </span>
               </div>
             </Link>

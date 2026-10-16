@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, Employee } from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 
 export async function GET(
   req: NextRequest,
@@ -7,12 +7,13 @@ export async function GET(
 ) {
   try {
     const { id } = await context.params;
-    const db = getDb();
-    const employee = db
-      .prepare("SELECT * FROM employees WHERE id = ?")
-      .get(id) as Employee | undefined;
+    const { data: employee, error } = await supabase
+      .from("employees")
+      .select("*")
+      .eq("id", id)
+      .single();
 
-    if (!employee) {
+    if (error || !employee) {
       return NextResponse.json(
         { success: false, error: "Funcionário não encontrado" },
         { status: 404 }
@@ -32,91 +33,50 @@ export async function PUT(
   try {
     const { id } = await context.params;
     const body = await req.json();
-    const db = getDb();
 
-    const existing = db
-      .prepare("SELECT * FROM employees WHERE id = ?")
-      .get(id) as Employee | undefined;
+    const updateFields: any = {};
+    const allowedKeys = [
+      "name",
+      "document",
+      "email",
+      "phone",
+      "department",
+      "position",
+      "pin",
+      "photo_url",
+      "face_descriptor",
+      "fingerprint_id",
+      "work_schedule_type",
+      "work_days",
+      "weekly_day_off",
+      "start_time",
+      "end_time",
+      "break_start",
+      "break_end",
+      "tolerance_minutes",
+      "is_active",
+    ];
 
-    if (!existing) {
-      return NextResponse.json(
-        { success: false, error: "Funcionário não encontrado" },
-        { status: 404 }
-      );
-    }
-
-    const {
-      name,
-      document,
-      email,
-      phone,
-      department,
-      position,
-      pin,
-      photo_url,
-      face_descriptor,
-      fingerprint_id,
-      work_schedule_type,
-      work_days,
-      weekly_day_off,
-      start_time,
-      end_time,
-      break_start,
-      break_end,
-      tolerance_minutes,
-      is_active,
-    } = body;
-
-    const updateStmt = db.prepare(`
-      UPDATE employees SET
-        name = @name,
-        document = @document,
-        email = @email,
-        phone = @phone,
-        department = @department,
-        position = @position,
-        pin = @pin,
-        photo_url = coalesce(@photo_url, photo_url),
-        face_descriptor = coalesce(@face_descriptor, face_descriptor),
-        fingerprint_id = coalesce(@fingerprint_id, fingerprint_id),
-        work_schedule_type = @work_schedule_type,
-        work_days = @work_days,
-        weekly_day_off = @weekly_day_off,
-        start_time = @start_time,
-        end_time = @end_time,
-        break_start = @break_start,
-        break_end = @break_end,
-        tolerance_minutes = @tolerance_minutes,
-        is_active = @is_active
-      WHERE id = @id
-    `);
-
-    updateStmt.run({
-      id: Number(id),
-      name: name ?? existing.name,
-      document: document !== undefined ? document : existing.document,
-      email: email !== undefined ? email : existing.email,
-      phone: phone !== undefined ? phone : existing.phone,
-      department: department ?? existing.department,
-      position: position ?? existing.position,
-      pin: pin ?? existing.pin,
-      photo_url: photo_url !== undefined ? photo_url : null,
-      face_descriptor: face_descriptor !== undefined ? face_descriptor : null,
-      fingerprint_id: fingerprint_id !== undefined ? fingerprint_id : null,
-      work_schedule_type: work_schedule_type ?? existing.work_schedule_type,
-      work_days: work_days !== undefined
-        ? (typeof work_days === "string" ? work_days : JSON.stringify(work_days))
-        : existing.work_days,
-      weekly_day_off: weekly_day_off ?? existing.weekly_day_off,
-      start_time: start_time ?? existing.start_time,
-      end_time: end_time ?? existing.end_time,
-      break_start: break_start ?? existing.break_start,
-      break_end: break_end ?? existing.break_end,
-      tolerance_minutes: tolerance_minutes !== undefined ? Number(tolerance_minutes) : existing.tolerance_minutes,
-      is_active: is_active !== undefined ? Number(is_active) : existing.is_active,
+    allowedKeys.forEach((key) => {
+      if (body[key] !== undefined) {
+        if (key === "work_days" && typeof body[key] !== "string") {
+          updateFields[key] = JSON.stringify(body[key]);
+        } else if (key === "tolerance_minutes") {
+          updateFields[key] = Number(body[key]);
+        } else {
+          updateFields[key] = body[key];
+        }
+      }
     });
 
-    const updated = db.prepare("SELECT * FROM employees WHERE id = ?").get(id);
+    const { data: updated, error } = await supabase
+      .from("employees")
+      .update(updateFields)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) throw error;
 
     return NextResponse.json({ success: true, employee: updated });
   } catch (error: any) {
@@ -130,9 +90,12 @@ export async function DELETE(
 ) {
   try {
     const { id } = await context.params;
-    const db = getDb();
-    // Soft delete or hard delete
-    db.prepare("UPDATE employees SET is_active = 0 WHERE id = ?").run(id);
+    const { error } = await supabase
+      .from("employees")
+      .update({ is_active: 0 })
+      .eq("id", id);
+
+    if (error) throw error;
 
     return NextResponse.json({ success: true, message: "Funcionário desativado com sucesso" });
   } catch (error: any) {
